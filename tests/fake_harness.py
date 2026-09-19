@@ -26,6 +26,7 @@ def _parse(argv: list[str]) -> dict:
         "--resume",
         "-r",
         "--prompt-file",
+        "-m",
         "-p",
         "--print",
         "--single",
@@ -38,7 +39,11 @@ def _parse(argv: list[str]) -> dict:
     positional: list[str] = []
     while i < len(argv):
         a = argv[i]
-        if a in ("-p", "--print", "--single") and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+        if (
+            a in ("-p", "--print", "--single")
+            and i + 1 < len(argv)
+            and not argv[i + 1].startswith("-")
+        ):
             prompt = argv[i + 1]
             i += 2
             continue
@@ -80,7 +85,11 @@ def main() -> int:
     parsed = _parse(sys.argv[1:])
     if sleep_s:
         time.sleep(sleep_s)
-    sid = parsed["resume"] or parsed["session_id"] or "00000000-0000-4000-8000-000000000000"
+    sid = (
+        parsed["resume"]
+        or parsed["session_id"]
+        or "00000000-0000-4000-8000-000000000000"
+    )
     if mode == "auth":
         print("Please run grok login: authentication failed", flush=True)
         return 1
@@ -97,7 +106,12 @@ def main() -> int:
     state = Path(os.environ.get("FAKE_HARNESS_STATE", "/tmp/fake-harness-state"))
     state.mkdir(parents=True, exist_ok=True)
     with (state / "calls.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"sid": sid, "resume": parsed["resume"], "prompt": parsed["prompt"]}) + "\n")
+        fh.write(
+            json.dumps(
+                {"sid": sid, "resume": parsed["resume"], "prompt": parsed["prompt"]}
+            )
+            + "\n"
+        )
     return 0
 
 

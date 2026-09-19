@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -17,12 +18,15 @@ from local_agent_mcp.contract import (
 from local_agent_mcp.harness import (
     enriched_env,
     env_file_credentials,
+    extract_reply_text,
+    grok_model,
     launch_argv,
     resume_argv,
 )
 from local_agent_mcp.ops import Ops
-from local_agent_mcp.registry import Slot
+from local_agent_mcp.registry import Registry, Slot
 from local_agent_mcp.server import create_server
+from local_agent_mcp.watch import main as watch_main
 
 
 def test_launch_argv_always_approve() -> None:
@@ -35,6 +39,38 @@ def test_launch_argv_always_approve() -> None:
     assert "--approval-mode" in omp and "yolo" in omp
     r = resume_argv("grok", "grok", cwd="/tmp", harness_session_id="s", prompt="next")
     assert "--resume" in r
+
+
+def test_grok_argv_pins_model() -> None:
+    grok = launch_argv("grok", "grok", cwd="/tmp", slot_id="s", prompt="hi")
+    assert grok[grok.index("-m") + 1] == "glm-53-flash"
+    r = resume_argv("grok", "grok", cwd="/tmp", harness_session_id="s", prompt="n")
+    assert r[r.index("-m") + 1] == "glm-53-flash"
+    omp = launch_argv("omp", "omp", cwd="/tmp", slot_id="s", prompt="hi")
+    assert "-m" not in omp
+    claude = launch_argv("claude", "claude", cwd="/tmp", slot_id="s", prompt="hi")
+    assert "-m" not in claude
+
+
+def test_grok_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOCAL_AGENT_MCP_GROK_MODEL", "glm-5.3-flash")
+    assert grok_model() == "glm-5.3-flash"
+    argv = launch_argv(
+        "grok", "grok", cwd="/tmp", slot_id="s", prompt="hi", model=grok_model()
+    )
+    assert argv[argv.index("-m") + 1] == "glm-5.3-flash"
+
+
+def test_extract_reply_text_multiline_json() -> None:
+    log = (
+        "--- turn start ---\n"
+        '{\n  "text": "PONG",\n  "usage": {\n    "input_tokens": 5\n  }\n}'
+    )
+    assert extract_reply_text(log) == "PONG"
+
+
+def test_extract_reply_text_single_line_json() -> None:
+    assert extract_reply_text('{"text": "hi", "usage": {"x": 1}}') == "hi"
 
 
 def test_enriched_env_backfills_credentials_from_env_file(
@@ -199,3 +235,61 @@ def test_mcp_tool_names_are_the_contract(ops: Ops) -> None:
     mcp = create_server(ops)
     names = sorted(t.name for t in mcp._tool_manager.list_tools())
     assert names == sorted(OPS_TOOLS)
+
+
+def test_read_status_exposes_clean_reply(ops: Ops, workdir: Path) -> None:
+    launched = ops.launch_session(
+        cwd=str(workdir), harness="grok", first_prompt="hello"
+    )
+    slot_id = launched["slot_id"]
+    ops.await_done(slot_id, timeout_s=5)
+    status = ops.read_status(slot_id)
+    assert status["last_reply"] == "ok:hello"
+    census = ops.read_census_reply(slot_id)
+    assert census["census_reply"] == "ok:hello"
+
+
+def test_watch_once_drains_events(
+    capsys: pytest.CaptureFixture, tmp_path: Path
+) -> None:
+    reg = Registry(tmp_path)
+    reg.emit("launch", "slot-1", harness="grok")
+    reg.emit("state", "slot-1", status="idle", last_error=None)
+    rc = watch_main(["--home", str(tmp_path), "--once"])
+    out = capsys.readouterr().out.strip().splitlines()
+    assert rc == 2
+    recs = [json.loads(ln) for ln in out]
+    assert [r["kind"] for r in recs] == ["launch", "state"]
+    assert recs[0]["slot_id"] == "slot-1"
+
+
+def test_state_event_emitted_on_idle_transition(ops: Ops, workdir: Path) -> None:
+    launched = ops.launch_session(cwd=str(workdir), harness="grok", first_prompt="hi")
+    ops.await_done(launched["slot_id"], timeout_s=5)
+    recs = [
+        json.loads(ln)
+        for ln in (ops.home / "events.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
+    kinds = [r["kind"] for r in recs]
+    assert "launch" in kinds
+    assert any(r["kind"] == "state" and r.get("status") == "idle" for r in recs)
+
+
+def test_mark_exited_when_pid_gone(ops: Ops, workdir: Path) -> None:
+    launched = ops.launch_session(cwd=str(workdir), harness="grok", first_prompt="bye")
+    slot_id = launched["slot_id"]
+    ops.await_done(slot_id, timeout_s=5)
+    slot_dir = ops.registry.slot_dir(slot_id)
+    # simulate a supervisor that vanished without writing an exit record
+    (slot_dir / "exit_code").unlink()
+    proc = subprocess.Popen(["/usr/bin/true"])
+    proc.wait()
+    (slot_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
+    slot = ops.registry.get(slot_id)
+    assert slot is not None
+    slot.pid = proc.pid
+    ops.registry.put(slot)
+    refreshed = ops._refresh(ops.registry.get(slot_id))
+    assert (slot_dir / "exit_code").read_text() == "-1"
+    assert refreshed.status == "idle"

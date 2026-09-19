@@ -26,6 +26,7 @@ from local_agent_mcp.harness import (
     enriched_env,
     extract_reply_text,
     extract_session_id,
+    grok_model,
     launch_argv,
     resume_argv,
     which_harness,
@@ -109,6 +110,7 @@ class Ops:
         return cls()
 
     def _refresh(self, slot: Slot) -> Slot:
+        old_status = slot.status
         slot_dir = self.registry.slot_dir(slot.slot_id)
         pid = _read_int(slot_dir / "pid") or slot.pid
         slot.pid = pid
@@ -131,6 +133,13 @@ class Ops:
                 slot.harness_session_id = found
         exit_code = _read_int(slot_dir / "exit_code")
         alive = exit_code is None and pid_alive(pid)
+        if not alive and exit_code is None and pid:
+            # process gone without an exit record (killed / reaped): mark exited
+            try:
+                (slot_dir / "exit_code").write_text("-1", encoding="utf-8")
+                exit_code = -1
+            except OSError:
+                pass
         if alive:
             slot.status = "running"
         elif auth:
@@ -139,8 +148,10 @@ class Ops:
         elif exit_code == 0:
             slot.status = "idle" if slot.harness_session_id else "dead"
         elif exit_code is None:
-            slot.status = "starting" if slot.status == "starting" and not log.strip() else (
-                "idle" if slot.harness_session_id else "dead"
+            slot.status = (
+                "starting"
+                if slot.status == "starting" and not log.strip()
+                else ("idle" if slot.harness_session_id else "dead")
             )
         else:
             slot.status = "idle" if slot.harness_session_id and not auth else "dead"
@@ -148,6 +159,10 @@ class Ops:
                 slot.last_error = INJECT_FAILED
         if slot.tty and slot.status == "running" and not tty.alive(slot.slot_id):
             slot.status = "idle" if slot.harness_session_id else "dead"
+        if slot.status != old_status and slot.status in ("idle", "dead"):
+            self.registry.emit(
+                "state", slot.slot_id, status=slot.status, last_error=slot.last_error
+            )
         self.registry.put(slot)
         return slot
 
@@ -171,7 +186,11 @@ class Ops:
             return error_payload(UNSUPPORTED_HARNESS, harness=harness)
         cwd_path = Path(cwd).expanduser()
         if not cwd_path.is_dir():
-            return {"ok": False, "error": INJECT_FAILED, "message": f"cwd does not exist: {cwd}"}
+            return {
+                "ok": False,
+                "error": INJECT_FAILED,
+                "message": f"cwd does not exist: {cwd}",
+            }
         binary = which_harness(harness, self.env)
         if not binary:
             return error_payload(
@@ -182,7 +201,12 @@ class Ops:
         if branch:
             err = _checkout_branch(cwd_path, branch)
             if err:
-                return {"ok": False, "error": INJECT_FAILED, "message": err, "branch": branch}
+                return {
+                    "ok": False,
+                    "error": INJECT_FAILED,
+                    "message": err,
+                    "branch": branch,
+                }
 
         slot_id = str(uuid.uuid4())
         prompt = first_prompt
@@ -211,6 +235,7 @@ class Ops:
             slot_id=slot_id,
             prompt=prompt,
             prompt_file=prompt_file if harness == "grok" else None,
+            model=grok_model(self.env) if harness == "grok" else None,
         )
         launched = self._spawn(slot, argv)
         if not launched["ok"]:
@@ -230,16 +255,16 @@ class Ops:
         (slot_dir / "exit_code").unlink(missing_ok=True)
         env = dict(self.env)
         src_root = str(Path(__file__).resolve().parents[1])
-        env["PYTHONPATH"] = os.pathsep.join(
-            [src_root, env.get("PYTHONPATH", "")]
-        )
+        env["PYTHONPATH"] = os.pathsep.join([src_root, env.get("PYTHONPATH", "")])
         if use_tty:
             if tty.spawn(slot.slot_id, argv, cwd=slot.cwd, env=env):
                 slot.tty = f"screen:{tty.session_name(slot.slot_id)}"
                 slot.status = "running"
                 self.registry.put(slot)
                 return {"ok": True}
-            return error_payload(INJECT_FAILED, slot_id=slot.slot_id, message="TTY spawn failed")
+            return error_payload(
+                INJECT_FAILED, slot_id=slot.slot_id, message="TTY spawn failed"
+            )
 
         supervisor = [
             sys.executable,
@@ -278,8 +303,10 @@ class Ops:
             time.sleep(0.05)
         proc.poll()
         slot = self._refresh(slot)
-        if slot.last_error == AUTH_FAILED or slot.status == "dead" and classify_log(
-            _read_text(slot_dir / "stdout.log")
+        if (
+            slot.last_error == AUTH_FAILED
+            or slot.status == "dead"
+            and classify_log(_read_text(slot_dir / "stdout.log"))
         ):
             slot.last_error = AUTH_FAILED
             slot.status = "dead"
@@ -320,7 +347,9 @@ class Ops:
 
         binary = which_harness(slot.harness, self.env)
         if not binary:
-            return error_payload(UNSUPPORTED_HARNESS, harness=slot.harness, slot_id=slot_id)
+            return error_payload(
+                UNSUPPORTED_HARNESS, harness=slot.harness, slot_id=slot_id
+            )
         sid = slot.harness_session_id or slot.slot_id
         slot_dir = self.registry.slot_dir(slot.slot_id)
         prompt_file = slot_dir / "steer_prompt.txt"
@@ -332,18 +361,25 @@ class Ops:
             harness_session_id=sid,
             prompt=payload,
             prompt_file=prompt_file if slot.harness == "grok" else None,
+            model=grok_model(self.env) if slot.harness == "grok" else None,
         )
         launched = self._spawn(slot, argv)
         if not launched.get("ok"):
             err = launched.get("error")
             if err == AUTH_FAILED:
                 return launched
-            if err == INJECT_FAILED and tty.alive(slot.slot_id) and tty.stuff(slot.slot_id, payload):
+            if (
+                err == INJECT_FAILED
+                and tty.alive(slot.slot_id)
+                and tty.stuff(slot.slot_id, payload)
+            ):
                 self.registry.emit("steer", slot_id, via="tty")
                 return error_payload(INJECT_OK, slot_id=slot_id, via="tty")
             return launched if err else error_payload(INJECT_FAILED, slot_id=slot_id)
         self.registry.emit("steer", slot_id, via="cli")
-        return error_payload(INJECT_OK, slot_id=slot_id, via="cli", pid=self.registry.get(slot_id).pid)  # type: ignore[union-attr]
+        return error_payload(
+            INJECT_OK, slot_id=slot_id, via="cli", pid=self.registry.get(slot_id).pid
+        )  # type: ignore[union-attr]
 
     def inject(self, slot_id: str, payload: str) -> dict:
         return self.steer(slot_id, payload)
@@ -367,6 +403,7 @@ class Ops:
             "pid": slot.pid,
             "harness_session_id": slot.harness_session_id,
             "last_error": slot.last_error,
+            "last_reply": slot.last_reply or "",
             "log_tail": tail,
         }
 
@@ -391,7 +428,9 @@ class Ops:
     def await_done(self, slot_id: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> dict:
         return self.done_when(slot_id, when="idle", timeout_s=timeout_s)
 
-    def done_when(self, slot_id: str, when: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> dict:
+    def done_when(
+        self, slot_id: str, when: str, timeout_s: float = DEFAULT_TIMEOUT_S
+    ) -> dict:
         slot = self.registry.get(slot_id)
         if slot is None:
             return error_payload(WRONG_SLOT, slot_id=slot_id)

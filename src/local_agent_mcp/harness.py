@@ -31,6 +31,11 @@ SESSION_ID_RE = re.compile(
 # MCP hosts often spawn the server without them, so backfill from ~/.env.
 CREDENTIAL_KEYS = ("RDSEC_API_KEY", "RDSEC_EXPERIMENTAL_API_KEY")
 
+# Pin the grok model so launches never depend on the ambient CLI default.
+GROK_MODEL_DEFAULT = "glm-53-flash"
+
+REPLY_KEYS = ("text", "result", "message", "census_reply")
+
 ENV_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*)$")
 
 
@@ -90,6 +95,11 @@ def enriched_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def grok_model(env: dict[str, str] | None = None) -> str:
+    env = env if env is not None else os.environ
+    return env.get("LOCAL_AGENT_MCP_GROK_MODEL", "").strip() or GROK_MODEL_DEFAULT
+
+
 def launch_argv(
     harness: str,
     binary: str,
@@ -98,12 +108,15 @@ def launch_argv(
     slot_id: str,
     prompt: str,
     prompt_file: Path | None = None,
+    model: str | None = None,
 ) -> list[str]:
     if harness not in HARNESSES:
         raise ValueError(UNSUPPORTED_HARNESS)
     if harness == "grok":
         cmd = [
             binary,
+            "-m",
+            model or grok_model(),
             "--always-approve",
             "--cwd",
             cwd,
@@ -145,6 +158,7 @@ def resume_argv(
     harness_session_id: str,
     prompt: str,
     prompt_file: Path | None = None,
+    model: str | None = None,
 ) -> list[str]:
     if harness not in HARNESSES:
         raise ValueError(UNSUPPORTED_HARNESS)
@@ -152,6 +166,8 @@ def resume_argv(
     if harness == "grok":
         cmd = [
             binary,
+            "-m",
+            model or grok_model(),
             "--always-approve",
             "--cwd",
             cwd,
@@ -206,6 +222,15 @@ def extract_session_id(text: str, fallback: str | None = None) -> str | None:
     return fallback
 
 
+def _reply_from_obj(obj: object) -> str | None:
+    if isinstance(obj, dict):
+        for key in REPLY_KEYS:
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+    return None
+
+
 def extract_reply_text(text: str) -> str:
     if not text:
         return ""
@@ -214,16 +239,25 @@ def extract_reply_text(text: str) -> str:
         for ln in text.strip().splitlines()
         if ln.strip() and not ln.startswith("--- turn")
     ]
+    # grok --output-format json pretty-prints one JSON object across lines:
+    # try from the last bare "{" line to the end of the log first.
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip() != "{":
+            continue
+        try:
+            reply = _reply_from_obj(json.loads("\n".join(lines[i:])))
+        except json.JSONDecodeError:
+            continue
+        if reply:
+            return reply
     for ln in reversed(lines):
         try:
             obj = json.loads(ln)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict):
-            for key in ("text", "result", "message", "census_reply"):
-                val = obj.get(key)
-                if isinstance(val, str) and val.strip():
-                    return val
+        reply = _reply_from_obj(obj)
+        if reply:
+            return reply
     return "\n".join(lines)[-8000:]
 
 

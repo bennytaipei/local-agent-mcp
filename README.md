@@ -22,6 +22,10 @@ Harnesses: `omp` | `grok` | `claude`
 
 Stable enums: `inject_ok` | `inject_failed` | `wrong_slot` | `session_dead` | `auth_failed` | `unsupported_harness`
 
+grok launches pin the model: argv always carries `-m glm-53-flash` (override with `LOCAL_AGENT_MCP_GROK_MODEL`). Credentials come from the process env or are backfilled from `~/.env` (see `scripts/dock-grok-env.sh` for the standalone-shell equivalent).
+
+`read_status` returns slot state plus `last_reply` (clean assistant text — no usage/thought JSON wrap) and `log_tail` (raw, for debugging). `read_census_reply` returns the same clean text as `census_reply`.
+
 Non-goals v0: war-room logic, Jira, git write as a product beyond this repo, replacing Steersman (Steersman stays the interactive census fallback).
 
 Wake/heartbeat for Floor/Dock: ops writes `events.jsonl` under the data dir. Wake hooks are not MCP tools; they can follow once this server is in use.
@@ -39,6 +43,31 @@ uv run pytest
 Data dir: `$LOCAL_AGENT_MCP_HOME` or `~/.local/share/local-agent-mcp`.
 
 Binary overrides: `LOCAL_AGENT_MCP_GROK`, `LOCAL_AGENT_MCP_CLAUDE`, `LOCAL_AGENT_MCP_OMP`.
+
+### How Floor gets woken
+
+`ops` appends one JSON line per event to `<data-dir>/events.jsonl`. Kinds:
+
+| Kind | When | Fields |
+|------|------|--------|
+| `launch` | slot launched | `harness`, `cwd` |
+| `status` | `read_status` called | `status` |
+| `steer` | payload injected | `via` (cli / tty) |
+| `done` | `await`/`done_when` matched | `when`, `status` |
+| `state` | slot transitions to `idle` or `dead` | `status`, `last_error` |
+
+Floor/Dock follows that file — no wake MCP tool exists by design:
+
+```bash
+tail -f ~/.local/share/local-agent-mcp/events.jsonl
+
+# or the watcher helper (same records; --once drains and exits):
+uv run --directory /Users/bennyf/TP-V1/local-agent-mcp python -m local_agent_mcp.watch
+```
+
+### Dock / standalone-shell grok launcher
+
+`scripts/dock-grok.sh` wraps grok for Dock Shell (zsh -ilc so `~/.env` RDSEC_* load; `scripts/dock-grok-env.sh` exports the same keys without a login shell). The MCP server does not use these; they exist for interactive Dock use.
 
 ### Floor / Grok config
 
