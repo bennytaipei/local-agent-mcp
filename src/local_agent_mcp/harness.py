@@ -27,6 +27,30 @@ SESSION_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# grok model providers in ~/.grok/config.toml read these from the process env;
+# MCP hosts often spawn the server without them, so backfill from ~/.env.
+CREDENTIAL_KEYS = ("RDSEC_API_KEY", "RDSEC_EXPERIMENTAL_API_KEY")
+
+ENV_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*)$")
+
+
+def env_file_credentials(path: Path) -> dict[str, str]:
+    """Parse KEY=value or "KEY: value" lines; uppercase keys only, values verbatim."""
+    creds: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return creds
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = line.removeprefix("export ")
+        m = ENV_LINE_RE.match(line)
+        if m and m.group(1).isupper():
+            creds[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+    return creds
+
 
 def which_harness(harness: str, env: dict[str, str] | None = None) -> str | None:
     env = env or os.environ
@@ -53,7 +77,16 @@ def enriched_env(base: dict[str, str] | None = None) -> dict[str, str]:
         "/opt/homebrew/bin",
         "/usr/local/bin",
     ]
-    env["PATH"] = os.pathsep.join([p for p in extras if Path(p).is_dir()] + [env.get("PATH", "")])
+    env["PATH"] = os.pathsep.join(
+        [p for p in extras if Path(p).is_dir()] + [env.get("PATH", "")]
+    )
+    missing = [k for k in CREDENTIAL_KEYS if not env.get(k, "").strip()]
+    if missing:
+        creds = env_file_credentials(Path.home() / ".env")
+        for key in missing:
+            val = creds.get(key, "").strip()
+            if val:
+                env[key] = val
     return env
 
 

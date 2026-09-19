@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from local_agent_mcp.contract import (
     AUTH_FAILED,
     INJECT_OK,
@@ -12,7 +14,12 @@ from local_agent_mcp.contract import (
     UNSUPPORTED_HARNESS,
     WRONG_SLOT,
 )
-from local_agent_mcp.harness import launch_argv, resume_argv
+from local_agent_mcp.harness import (
+    enriched_env,
+    env_file_credentials,
+    launch_argv,
+    resume_argv,
+)
 from local_agent_mcp.ops import Ops
 from local_agent_mcp.registry import Slot
 from local_agent_mcp.server import create_server
@@ -28,6 +35,47 @@ def test_launch_argv_always_approve() -> None:
     assert "--approval-mode" in omp and "yolo" in omp
     r = resume_argv("grok", "grok", cwd="/tmp", harness_session_id="s", prompt="next")
     assert "--resume" in r
+
+
+def test_enriched_env_backfills_credentials_from_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".env").write_text(
+        "# comment\n"
+        "rdsec-ai-endpoint-url: https://example.invalid/v1\n"
+        "RDSEC_API_KEY: file-key\n"
+        'RDSEC_EXPERIMENTAL_API_KEY="file-exp"\n',
+        encoding="utf-8",
+    )
+    env = enriched_env({"PATH": "/usr/bin:/bin"})
+    assert env["RDSEC_API_KEY"] == "file-key"
+    assert env["RDSEC_EXPERIMENTAL_API_KEY"] == "file-exp"
+
+
+def test_enriched_env_prefers_existing_credentials(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("RDSEC_API_KEY: file-key\n", encoding="utf-8")
+    env = enriched_env({"PATH": "/usr/bin:/bin", "RDSEC_API_KEY": "process-key"})
+    assert env["RDSEC_API_KEY"] == "process-key"
+
+
+def test_enriched_env_without_env_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    env = enriched_env({"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+    assert "RDSEC_API_KEY" not in env
+
+
+def test_env_file_credentials_skips_lowercase_and_comments(tmp_path: Path) -> None:
+    f = tmp_path / ".env"
+    f.write_text(
+        "# RDSEC_API_KEY: commented\n"
+        "atlassian_url: https://x\n"
+        "export RDSEC_API_KEY=exported\n",
+        encoding="utf-8",
+    )
+    creds = env_file_credentials(f)
+    assert creds == {"RDSEC_API_KEY": "exported"}
 
 
 def test_unsupported_harness(ops: Ops, workdir: Path) -> None:
@@ -79,7 +127,9 @@ def test_inject_alias(ops: Ops, workdir: Path) -> None:
 
 
 def test_done_when_substring(ops: Ops, workdir: Path) -> None:
-    launched = ops.launch_session(cwd=str(workdir), harness="omp", first_prompt="hello world")
+    launched = ops.launch_session(
+        cwd=str(workdir), harness="omp", first_prompt="hello world"
+    )
     out = ops.done_when(launched["slot_id"], when="ok:", timeout_s=5)
     assert out["matched"] is True
 
@@ -114,11 +164,19 @@ def test_session_dead(ops: Ops) -> None:
 def test_branch_checkout(ops: Ops, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, env=env)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t"], cwd=repo, check=True, env=env
+    )
     subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, env=env)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True, env=env)
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True, env=env
+    )
     (repo / "f").write_text("a", encoding="utf-8")
     subprocess.run(["git", "add", "f"], cwd=repo, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, env=env)
@@ -127,9 +185,13 @@ def test_branch_checkout(ops: Ops, tmp_path: Path) -> None:
     ).strip()
     subprocess.run(["git", "checkout", "-qb", "feat"], cwd=repo, check=True, env=env)
     subprocess.run(["git", "checkout", "-q", default], cwd=repo, check=True, env=env)
-    out = ops.launch_session(cwd=str(repo), harness="grok", first_prompt="x", branch="feat")
+    out = ops.launch_session(
+        cwd=str(repo), harness="grok", first_prompt="x", branch="feat"
+    )
     assert out["ok"] is True
-    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+    head = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"], text=True
+    ).strip()
     assert head == "feat"
 
 
