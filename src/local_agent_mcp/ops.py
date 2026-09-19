@@ -36,6 +36,8 @@ from local_agent_mcp.registry import Registry, Slot
 DEFAULT_TIMEOUT_S = 30.0
 SPAWN_GRACE_S = 0.4
 POLL_S = 0.2
+BEAT_INTERVAL_S = 15.0
+_BEAT_TS: dict[str, float] = {}
 
 
 def default_home() -> Path:
@@ -109,6 +111,24 @@ class Ops:
     def from_env(cls) -> Ops:
         return cls()
 
+    def _excerpt(self, text: str | None, limit: int = 120) -> str:
+        raw = (text or "").strip().replace("\n", " ")
+        if len(raw) > limit:
+            return raw[: limit - 3] + "..."
+        return raw
+
+    def _emit_beat(self, slot: Slot, *, kind: str = "beat") -> None:
+        """Periodic/status activity line for Floor-visible interim path."""
+        self.registry.emit(
+            kind,
+            slot.slot_id,
+            harness=slot.harness,
+            status=slot.status,
+            excerpt=self._excerpt(slot.last_reply or slot.first_prompt),
+            pid=slot.pid,
+            ticket=slot.ticket,
+        )
+
     def _refresh(self, slot: Slot) -> Slot:
         old_status = slot.status
         slot_dir = self.registry.slot_dir(slot.slot_id)
@@ -161,8 +181,19 @@ class Ops:
             slot.status = "idle" if slot.harness_session_id else "dead"
         if slot.status != old_status and slot.status in ("idle", "dead"):
             self.registry.emit(
-                "state", slot.slot_id, status=slot.status, last_error=slot.last_error
+                "state",
+                slot.slot_id,
+                harness=slot.harness,
+                status=slot.status,
+                last_error=slot.last_error,
+                excerpt=self._excerpt(slot.last_reply or slot.first_prompt),
             )
+        elif slot.status == "running":
+            now = time.time()
+            last = _BEAT_TS.get(slot.slot_id, 0.0)
+            if now - last >= BEAT_INTERVAL_S or slot.status != old_status:
+                self._emit_beat(slot, kind="beat")
+                _BEAT_TS[slot.slot_id] = now
         self.registry.put(slot)
         return slot
 
@@ -241,7 +272,16 @@ class Ops:
         if not launched["ok"]:
             return launched
         slot = self.registry.get(slot_id) or slot
-        self.registry.emit("launch", slot_id, harness=harness, cwd=slot.cwd)
+        self.registry.emit(
+            "launch",
+            slot_id,
+            harness=harness,
+            cwd=slot.cwd,
+            status=slot.status,
+            excerpt=self._excerpt(first_prompt),
+            ticket=ticket,
+            pid=slot.pid,
+        )
         return {
             "ok": True,
             "slot_id": slot_id,
@@ -391,7 +431,14 @@ class Ops:
         slot = self._refresh(slot)
         log = _read_text(self.registry.slot_dir(slot.slot_id) / "stdout.log")
         tail = "\n".join(log.splitlines()[-40:])
-        self.registry.emit("status", slot_id, status=slot.status)
+        self.registry.emit(
+            "status",
+            slot_id,
+            harness=slot.harness,
+            status=slot.status,
+            excerpt=self._excerpt(slot.last_reply or slot.first_prompt),
+            pid=slot.pid,
+        )
         return {
             "ok": True,
             "slot_id": slot.slot_id,
@@ -440,7 +487,15 @@ class Ops:
             last = self._refresh(self.registry.get(slot_id) or slot)
             log = _read_text(self.registry.slot_dir(slot_id) / "stdout.log")
             if _matches(last, log, when):
-                self.registry.emit("done", slot_id, when=when, status=last.status)
+                self.registry.emit(
+                    "done",
+                    slot_id,
+                    when=when,
+                    harness=last.harness,
+                    status=last.status,
+                    excerpt=self._excerpt(last.last_reply or last.first_prompt),
+                    pid=last.pid,
+                )
                 out = {
                     "ok": True,
                     "slot_id": slot_id,

@@ -44,26 +44,42 @@ Data dir: `$LOCAL_AGENT_MCP_HOME` or `~/.local/share/local-agent-mcp`.
 
 Binary overrides: `LOCAL_AGENT_MCP_GROK`, `LOCAL_AGENT_MCP_CLAUDE`, `LOCAL_AGENT_MCP_OMP`.
 
-### How Floor gets woken
+### Floor-visible activity (interim)
+
+**Not a Grok Bot UI card.** Until a product activity card exists, Floor sees mid-run + done beats as chat sitreps that Dock (or Floor) forwards from `events.jsonl`.
 
 `ops` appends one JSON line per event to `<data-dir>/events.jsonl`. Kinds:
 
 | Kind | When | Fields |
 |------|------|--------|
-| `launch` | slot launched | `harness`, `cwd` |
-| `status` | `read_status` called | `status` |
+| `launch` | slot launched | `harness`, `cwd`, `status`, `excerpt`, `ticket?`, `pid?` |
+| `beat` | running slot refreshed (~every 15s) | `harness`, `status`, `excerpt`, `pid?` |
+| `status` | `read_status` called | `harness`, `status`, `excerpt`, `pid?` |
 | `steer` | payload injected | `via` (cli / tty) |
-| `done` | `await`/`done_when` matched | `when`, `status` |
-| `state` | slot transitions to `idle` or `dead` | `status`, `last_error` |
+| `done` | `await`/`done_when` matched | `when`, `harness`, `status`, `excerpt` |
+| `state` | slot transitions to `idle` or `dead` | `harness`, `status`, `last_error`, `excerpt` |
+| `error` | reserved for auth/launch failures | `error`, `message?` |
 
-Floor/Dock follows that file — no wake MCP tool exists by design:
+Run the watcher (JSON or sitrep one-liners):
 
 ```bash
-tail -f ~/.local/share/local-agent-mcp/events.jsonl
+# sitrep lines Dock posts to Floor (interim CloudAgent-like babysit text)
+./scripts/floor-activity-watch.sh
+# or:
+uv run --directory /Users/bennyf/TP-V1/local-agent-mcp \
+  python -m local_agent_mcp.watch --format sitrep
 
-# or the watcher helper (same records; --once drains and exits):
-uv run --directory /Users/bennyf/TP-V1/local-agent-mcp python -m local_agent_mcp.watch
+# drain once:
+uv run --directory /Users/bennyf/TP-V1/local-agent-mcp \
+  python -m local_agent_mcp.watch --once --format sitrep
+
+# raw JSONL:
+tail -f ~/.local/share/local-agent-mcp/events.jsonl
 ```
+
+**Still missing (product):** native Grok Bot activity card, auto-wake of Floor without Dock polling/posting, live token streaming into Floor chat.
+
+Wake hooks are not MCP tools (contract v0).
 
 ### Dock / standalone-shell grok launcher
 

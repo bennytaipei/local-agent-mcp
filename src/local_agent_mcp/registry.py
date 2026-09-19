@@ -114,7 +114,15 @@ class Registry:
         return slot
 
     def emit(self, kind: str, slot_id: str, **fields: object) -> None:
-        """Heartbeat log for later Floor/Dock wake hooks. Not an MCP tool."""
-        rec = {"ts": time.time(), "kind": kind, "slot_id": slot_id, **fields}
+        """Heartbeat log for Floor/Dock activity (interim). Not an MCP tool.
+
+        Common fields (callers should pass when known): harness, status, excerpt.
+        Kinds: launch | status | beat | steer | done | state | error.
+        """
+        rec = {"ts": time.time(), "kind": kind, "slot_id": slot_id or "", **fields}
+        # keep excerpt short for chat sitreps
+        if "excerpt" in rec and isinstance(rec["excerpt"], str) and len(rec["excerpt"]) > 160:
+            rec["excerpt"] = rec["excerpt"][:157] + "..."
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
         with self.events_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, default=str) + "\n")

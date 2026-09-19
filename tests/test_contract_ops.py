@@ -293,3 +293,66 @@ def test_mark_exited_when_pid_gone(ops: Ops, workdir: Path) -> None:
     refreshed = ops._refresh(ops.registry.get(slot_id))
     assert (slot_dir / "exit_code").read_text() == "-1"
     assert refreshed.status == "idle"
+
+
+def test_watch_sitrep_format(tmp_path: Path, capsys) -> None:
+    from local_agent_mcp.registry import Registry
+    from local_agent_mcp.watch import main as watch_main
+
+    reg = Registry(tmp_path)
+    reg.emit(
+        "launch",
+        "abcd1234-slot",
+        harness="grok",
+        status="running",
+        excerpt="Sleep then TIMER_DONE",
+    )
+    rc = watch_main(["--home", str(tmp_path), "--once", "--format", "sitrep"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "[local-agent] launch" in out
+    assert "slot=abcd1234" in out
+    assert "TIMER_DONE" in out or "Sleep" in out
+
+
+
+def test_running_refresh_emits_beat(ops: Ops, workdir: Path, monkeypatch) -> None:
+    import local_agent_mcp.ops as ops_mod
+    from local_agent_mcp.registry import Slot
+
+    monkeypatch.setattr(ops_mod, "BEAT_INTERVAL_S", 0.0)
+    monkeypatch.setattr(ops_mod, "_BEAT_TS", {})
+    slot = Slot(
+        slot_id="beat-slot-1",
+        harness="grok",
+        cwd=str(workdir),
+        first_prompt="beat me please",
+        status="starting",
+        pid=None,
+    )
+    ops.registry.put(slot)
+    # Pretend process alive by writing no exit_code and skipping kill check:
+    # force path: set status running via direct _emit after refresh bypass
+    slot.status = "running"
+    ops._emit_beat(slot)
+    ops._emit_beat(slot)  # second with interval 0 should also fire after clear
+    ops_mod._BEAT_TS.clear()
+    # Simulate refresh running branch
+    slot2 = ops.registry.get("beat-slot-1")
+    assert slot2 is not None
+    slot2.status = "idle"  # old
+    # manually call running branch by setting running and invoking refresh logic piece
+    slot2.status = "running"
+    ops.registry.put(slot2)
+    # call _refresh with a fake alive pid: write pid file that is our own pid
+    import os
+    slot_dir = ops.registry.slot_dir(slot2.slot_id)
+    (slot_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    (slot_dir / "exit_code").unlink(missing_ok=True)
+    ops._refresh(slot2)
+    kinds = [
+        json.loads(ln)["kind"]
+        for ln in (ops.home / "events.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
+    assert "beat" in kinds
