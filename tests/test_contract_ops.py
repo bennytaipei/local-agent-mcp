@@ -356,3 +356,39 @@ def test_running_refresh_emits_beat(ops: Ops, workdir: Path, monkeypatch) -> Non
         if ln.strip()
     ]
     assert "beat" in kinds
+
+
+def test_list_sessions_includes_transcript_fields(ops: Ops, workdir: Path) -> None:
+    launched = ops.launch_session(
+        cwd=str(workdir), harness="grok", first_prompt="hello-tx"
+    )
+    slot_id = launched["slot_id"]
+    ops.await_done(slot_id, timeout_s=5)
+    listed = ops.list_sessions()
+    assert listed["ok"]
+    hit = next(s for s in listed["sessions"] if s["slot_id"] == slot_id)
+    assert hit["transcript_path"].endswith(f"slots/{slot_id}/stdout.log")
+    assert hit["log_bytes"] > 0
+
+
+def test_read_transcript_wrong_slot(ops: Ops) -> None:
+    out = ops.read_transcript("no-such-slot")
+    assert out["error"] == WRONG_SLOT
+    assert out["ok"] is False
+
+
+def test_read_transcript_slice(ops: Ops, workdir: Path) -> None:
+    launched = ops.launch_session(
+        cwd=str(workdir), harness="grok", first_prompt="slice-me"
+    )
+    slot_id = launched["slot_id"]
+    ops.await_done(slot_id, timeout_s=5)
+    full = ops.read_transcript(slot_id, offset_bytes=0, max_bytes=1_000_000)
+    assert full["ok"] is True
+    assert full["path"].endswith("stdout.log")
+    assert full["log_bytes"] >= len(full["text"].encode("utf-8"))
+    assert full["mtime"] is not None
+    tiny = ops.read_transcript(slot_id, offset_bytes=0, max_bytes=8)
+    assert tiny["ok"] is True
+    assert tiny["truncated"] is True
+    assert len(tiny["text"].encode("utf-8")) <= 8

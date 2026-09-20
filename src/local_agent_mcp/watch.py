@@ -21,9 +21,24 @@ from local_agent_mcp.ops import default_home
 POLL_S = 0.5
 
 
+def _transcript_path(slot_id: str) -> Path | None:
+    if not slot_id:
+        return None
+    return default_home() / "slots" / slot_id / "stdout.log"
+
+
+def _tail_lines(path: Path, n: int = 40) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[-n:])
+
+
 def _sitrep(rec: dict) -> str:
     kind = rec.get("kind", "?")
-    slot = (rec.get("slot_id") or "")[:8] or "-"
+    slot_id = rec.get("slot_id") or ""
+    slot = slot_id[:8] or "-"
     harness = rec.get("harness") or "-"
     status = rec.get("status") or rec.get("when") or "-"
     excerpt = (rec.get("excerpt") or rec.get("message") or rec.get("error") or "").strip()
@@ -32,6 +47,13 @@ def _sitrep(rec: dict) -> str:
     base = f"[local-agent] {kind} slot={slot} harness={harness} status={status}"
     if excerpt:
         base += f" | {excerpt}"
+    path = _transcript_path(slot_id)
+    if path is not None:
+        base += f" | transcript={path}"
+        if kind in ("done", "state", "error", "launch") and path.exists():
+            tail = _tail_lines(path, 40)
+            if tail:
+                base += "\n--- transcript tail ---\n" + tail
     return base
 
 

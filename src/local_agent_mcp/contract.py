@@ -1,11 +1,14 @@
-"""MCP CONTRACT v0 — stable enums, harnesses, and recipe fields.
+"""MCP CONTRACT v0.1 — stable enums, harnesses, and recipe fields.
 
+v0.1 adds observability ops (read_transcript; list_sessions transcript fields).
 Do not add product tools or error names beyond this module.
 """
 
 from __future__ import annotations
 
 from typing import Literal
+
+CONTRACT_VERSION = "v0.1"
 
 HARNESSES = ("omp", "grok", "claude")
 Harness = Literal["omp", "grok", "claude"]
@@ -50,6 +53,7 @@ OPS_TOOLS = (
     "read_census_reply",
     "await",
     "done_when",
+    "read_transcript",
 )
 
 

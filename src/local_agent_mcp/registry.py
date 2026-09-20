@@ -42,6 +42,13 @@ class Slot:
         return cls(**{k: v for k, v in data.items() if k in known})
 
     def public(self) -> dict:
+        path = self.log_path or ""
+        log_bytes = 0
+        if path:
+            try:
+                log_bytes = Path(path).stat().st_size
+            except OSError:
+                log_bytes = 0
         return {
             "slot_id": self.slot_id,
             "harness": self.harness,
@@ -53,6 +60,8 @@ class Slot:
             "tty": self.tty,
             "status": self.status,
             "last_error": self.last_error,
+            "transcript_path": path,
+            "log_bytes": log_bytes,
         }
 
 
