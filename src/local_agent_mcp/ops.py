@@ -472,6 +472,54 @@ class Ops:
             "census_reply": reply,
         }
 
+
+    def read_transcript(
+        self,
+        slot_id: str,
+        offset_bytes: int = 0,
+        max_bytes: int = 65536,
+    ) -> dict:
+        """Read slot stdout.log (Floor/Dock observability — contract v0.1)."""
+        slot = self.registry.get(slot_id)
+        if slot is None:
+            return error_payload(WRONG_SLOT, slot_id=slot_id)
+        path = (
+            Path(slot.log_path)
+            if slot.log_path
+            else self.registry.slot_dir(slot_id) / "stdout.log"
+        )
+        if not path.exists():
+            return {
+                "ok": True,
+                "path": str(path),
+                "text": "",
+                "truncated": False,
+                "mtime": None,
+                "log_bytes": 0,
+                "offset_bytes": max(0, int(offset_bytes)),
+                "max_bytes": max(0, int(max_bytes)),
+            }
+        st = path.stat()
+        offset = max(0, int(offset_bytes))
+        limit = max(0, int(max_bytes))
+        with path.open("rb") as fh:
+            fh.seek(min(offset, st.st_size))
+            raw = fh.read(limit + 1 if limit else 0)
+        truncated = bool(limit and len(raw) > limit)
+        if truncated:
+            raw = raw[:limit]
+        text = raw.decode("utf-8", errors="replace")
+        return {
+            "ok": True,
+            "path": str(path),
+            "text": text,
+            "truncated": truncated,
+            "mtime": st.st_mtime,
+            "log_bytes": st.st_size,
+            "offset_bytes": offset,
+            "max_bytes": limit,
+        }
+
     def await_done(self, slot_id: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> dict:
         return self.done_when(slot_id, when="idle", timeout_s=timeout_s)
 

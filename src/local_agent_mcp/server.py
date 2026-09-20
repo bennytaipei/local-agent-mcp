@@ -1,4 +1,4 @@
-"""stdio MCP server. Product surface is MCP CONTRACT v0 — nothing else."""
+"""stdio MCP server. Product surface is MCP CONTRACT v0.1 — nothing else."""
 
 from __future__ import annotations
 
@@ -18,8 +18,9 @@ def create_server(ops: Ops | None = None) -> FastMCP:
     mcp = FastMCP(
         "local-agent-mcp",
         instructions=(
-            "Ops Floor contract v0. Tools: list_sessions, launch_session, "
-            "steer/inject, read_status/read_census_reply, await/done_when. "
+            "Ops Floor contract v0.1. Tools: list_sessions, launch_session, "
+            "steer/inject, read_status/read_census_reply, await/done_when, "
+            "read_transcript. list_sessions includes transcript_path + log_bytes. "
             "Harnesses: omp | grok | claude. Errors: inject_ok | inject_failed | "
             "wrong_slot | session_dead | auth_failed | unsupported_harness."
         ),
@@ -77,6 +78,24 @@ def create_server(ops: Ops | None = None) -> FastMCP:
     )
     def done_when(slot_id: str, when: str, timeout_s: float = 30.0) -> dict:
         return ops.done_when(slot_id, when=when, timeout_s=timeout_s)
+
+
+    @mcp.tool(
+        name="read_transcript",
+        description=(
+            "Read a slot's stdout.log transcript. "
+            "Args: slot_id, offset_bytes?=0, max_bytes?=65536. "
+            "Returns path, text, truncated, mtime, log_bytes."
+        ),
+    )
+    def read_transcript(
+        slot_id: str,
+        offset_bytes: int = 0,
+        max_bytes: int = 65536,
+    ) -> dict:
+        return ops.read_transcript(
+            slot_id, offset_bytes=offset_bytes, max_bytes=max_bytes
+        )
 
     # Keep a handle for tests; FastMCP does not expose ops otherwise.
     mcp._local_agent_ops = ops  # type: ignore[attr-defined]
